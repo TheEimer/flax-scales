@@ -1,0 +1,1 @@
+python main.py --workdir=./resnet_50_imagenet --config=configs/default.py

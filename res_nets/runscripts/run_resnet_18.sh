@@ -1,0 +1,1 @@
+python main.py --workdir=./resnet_18_imagenet --config=configs/default.py --config.model=ResNet18
