@@ -161,3 +161,98 @@ _ResNet1 = partial(ResNet, stage_sizes=[1], block_cls=ResNetBlock)
 _ResNet1Local = partial(
     ResNet, stage_sizes=[1], block_cls=ResNetBlock, conv=nn.ConvLocal
 )
+
+class WideResNetBlock(nn.Module):
+  """ResNet block."""
+
+  filters: int
+  conv: ModuleDef
+  norm: ModuleDef
+  act: Callable
+  strides: tuple[int, int] = (1, 1)
+  dropout_rate: float = 0.3
+  train: bool = True
+
+  @nn.compact
+  def __call__(
+      self,
+      x,
+  ):
+    residual = x
+    y = self.norm()(x)
+    y = self.act(y)
+    y = self.conv(self.filters, (3, 3), self.strides)(x)
+    y = nn.Dropout(rate=self.dropout_rate, deterministic=not self.train)(y)
+    y = self.norm()(y)
+    y = self.act(y)
+    y = self.conv(self.filters, (3, 3))(y)
+
+    if residual.shape != y.shape:
+      residual = self.conv(
+          self.filters, (1, 1), self.strides, name='conv_proj'
+      )(residual)
+
+    # NOTE: The other resnet uses activation after addition. The torch code I used as base not. Should be checked.
+    return residual + y
+
+class WideResNet(nn.Module):
+    """ResNetV1.5."""
+
+    stage_sizes: Sequence[int]
+    block_cls: ModuleDef
+    num_classes: int
+    num_filters: int = 64
+    dtype: Any = jnp.float32
+    act: Callable = nn.relu
+    conv: ModuleDef = nn.Conv
+    dropout_rate: float = 0.3
+
+    @nn.compact
+    def __call__(self, x, train: bool = True):
+        conv = partial(self.conv, use_bias=False, dtype=self.dtype)
+        norm = partial(
+                nn.BatchNorm,
+                use_running_average=not train,
+                momentum=0.9,
+                epsilon=1e-5,
+                dtype=self.dtype,
+                axis_name='batch',
+            )
+
+        # These are the arguments from the torch implementation, buuuuut... should be tested, not sure about the kernel/stride/padding
+        # I think flax needs the tuple, not just the int?
+        x = conv(
+                self.num_filters,
+                (3,3),
+                1,
+                padding=1,
+                name='conv_init',
+            )(x)
+        for i, block_size in enumerate(self.stage_sizes):
+            for j in range(block_size):
+                # Test this, may need to be (2,1) for first
+                strides = (2, 2) if i > 0 and j == 0 else (1, 1)
+                x = self.block_cls(
+                            self.num_filters * 2**i,
+                            strides=strides,
+                            conv=conv,
+                            norm=norm,
+                            act=self.act,
+                            dropout_rate=self.dropout_rate,
+                            train=train
+                        )(x)
+        x = norm(name='bn_init')(x)
+        x = self.act(x)
+        x = nn.avg_pool(x, 8)
+        # This is in the original, but I think the avg pool does this implicitly
+        #x = jnp.mean(x, axis=(1, 2))
+        x = nn.Dense(self.num_classes, dtype=self.dtype)(x)
+        x = jnp.asarray(x, self.dtype)
+        return x
+
+WideResNet50_2 = partial(
+    WideResNet, stage_sizes=[3, 4, 6, 3], block_cls=WideResNetBlock, dropout_rate=0.3
+)
+WideResNet101_2 = partial(
+    WideResNet, stage_sizes=[3, 4, 23, 3], block_cls=WideResNetBlock, dropout_rate=0.3
+)
